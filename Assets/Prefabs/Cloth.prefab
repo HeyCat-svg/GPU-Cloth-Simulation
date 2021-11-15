@@ -1,0 +1,108 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1 &3450854174929398156
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 3450854174929398155}
+  - component: {fileID: 3450854174929398154}
+  - component: {fileID: 3450854174929398157}
+  m_Layer: 0
+  m_Name: Cloth
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &3450854174929398155
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 3450854174929398156}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 2, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_RootOrder: 0
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &3450854174929398154
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 3450854174929398156}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: acec25e8a259fd44eb0cdfbfe0eef81d, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  nodeUpdateCS: {fileID: 7200000, guid: b3f4394ba0d5c204b9beed99ab5cebd3, type: 3}
+  collisionResponseCS: {fileID: 7200000, guid: 4581d05d1d945f04c88923f9e6f2e63b, type: 3}
+  normalCS: {fileID: 7200000, guid: e4504847caac8bb4aab0988de45597df, type: 3}
+  tangentCS: {fileID: 7200000, guid: d9ffe9947c7d28141a7998ac2583f4be, type: 3}
+  accelerationCS: {fileID: 7200000, guid: 9d205032a98a47f4fa4b19f2e2e98e80, type: 3}
+  clothObj: {fileID: 3450854174929398156}
+  verCountPerRow: 64
+  verCountPerCol: 64
+  gridSize: 0.0159
+  bendingAngle: 3.1415927
+  lineBreakThres: 3
+  damping: 1
+  looper: 6
+  g: {x: 0, y: -3, z: 0}
+  iterCount: 42
+  anchorRowAndCol:
+  - {x: 0, y: 0}
+  - {x: 8, y: 0}
+  - {x: 16, y: 0}
+  - {x: 24, y: 0}
+  - {x: 32, y: 0}
+  - {x: 40, y: 0}
+  - {x: 48, y: 0}
+  - {x: 56, y: 0}
+  - {x: 63, y: 0}
+  anchorRelPos:
+  - {x: 0, y: 0, z: 0, w: 1}
+  - {x: 0.1272, y: 0, z: 0, w: 1}
+  - {x: 0.2544, y: 0, z: 0, w: 1}
+  - {x: 0.3816, y: 0, z: 0, w: 1}
+  - {x: 0.5088, y: 0, z: 0, w: 1}
+  - {x: 0.636, y: 0, z: 0, w: 1}
+  - {x: 0.76, y: 0, z: 0, w: 1}
+  - {x: 0.88, y: 0, z: 0, w: 1}
+  - {x: 1, y: 0, z: 0, w: 1}
+  wind_V: {x: 0, y: 0.3, z: 1.8}
+  dragCoeff: 1
+  liftCoeff: 1.15
+  windNoiseScale: 16
+  windNoiceGridSize: 2
+  windNoiceStrength: 1
+  windVibrationStrength: 0.3
+  verCount: 0
+--- !u!114 &3450854174929398157
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 3450854174929398156}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: a7a6ec08b3cc0a74f87a43b2590b18d9, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  material: {fileID: 2100000, guid: 532de4435d204504d9e1eff67149e1b9, type: 2}
+  meshTopology: 0
+  mesh: {fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}
+  alpha: 0.5
+  K_amp: 0.5
+  metallicness: 0
+  ready: 0

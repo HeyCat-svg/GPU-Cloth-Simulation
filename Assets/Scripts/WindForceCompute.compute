@@ -1,0 +1,103 @@
+#pragma kernel WindForceCompute
+
+StructuredBuffer<float4> _P0_buffer;
+StructuredBuffer<float4> _P1_buffer;
+StructuredBuffer<float4> _Normal;
+RWStructuredBuffer<float4> _Acceleration;
+
+uint _VerCountPerCol;
+uint _VerCountPerRow;
+
+float _DeltaT_INV;
+float4 _G;
+
+/* wind attribution */
+float4 _Wind_V;
+float _Drag;    // 阻力系数
+float _Lift;    // 升力系数
+
+float4 _Wind_WorldToLocal0;     // 变换矩阵的第一行
+float4 _Wind_WorldToLocal1;
+
+float _WindNoiseScale;          // WindLocal坐标缩放
+float _WindNoiseGridSize;       // 相邻格点宽度
+float _WindNoiseStrength;
+
+float _WindVibrationStrength;
+
+/* Time attribution */
+float _Time;
+
+
+/* 输入格点坐标 输出格点梯度 */
+float2 grad(float x, float y) {
+    float2 vec = float2(0, 0);
+    vec.x = x * 127.1 + y * 311.7;
+    vec.y = x * 269.5 + y * 183.3;
+
+    float sin0 = sin(vec.x) * 43758.5453123;
+    float sin1 = sin(vec.y) * 43758.5453123;
+    vec.x = frac(sin0) * 2.0 - 1.0;
+    vec.y = frac(sin1) * 2.0 - 1.0;
+    return normalize(vec);
+}
+
+/* 输入三维坐标 输出一个连续的随机数 */
+float perlin(float3 coord) {    
+    // 世界坐标转风向的本地坐标
+    float2 windCoord = float2(0, 0);
+    windCoord.x = dot(_Wind_WorldToLocal0.xyz, coord) * _WindNoiseScale / _WindNoiseGridSize;
+    windCoord.y = dot(_Wind_WorldToLocal1.xyz, coord) * _WindNoiseScale / _WindNoiseGridSize;
+
+    float2 windCoordGridP = float2(floor(windCoord.x), floor(windCoord.y));
+    
+    float2 grad0 = grad(windCoordGridP.x, windCoordGridP.y);
+    float2 grad1 = grad(windCoordGridP.x + 1, windCoordGridP.y);
+    float2 grad2 = grad(windCoordGridP.x + 1, windCoordGridP.y + 1);
+    float2 grad3 = grad(windCoordGridP.x, windCoordGridP.y + 1);
+
+    float d0 = dot(windCoord - windCoordGridP, grad0);
+    float d1 = dot(windCoord - (windCoordGridP + float2(1, 0)), grad1);
+    float d2 = dot(windCoord - (windCoordGridP + float2(1, 1)), grad2);
+    float d3 = dot(windCoord - (windCoordGridP + float2(0, 1)), grad3);
+     
+    float d = windCoord.x - windCoordGridP.x;
+    float t0 = 6.0 * pow(d, 5) - 15 * pow(d, 4) + 10 * pow(d, 3);
+    float n0 = lerp(d0, d1, t0);
+    float n1 = lerp(d3, d2, t0);
+
+    d = windCoord.y - windCoordGridP.y;
+    t0 = 6.0 * pow(d, 5) - 15 * pow(d, 4) + 10 * pow(d, 3);
+    return lerp(n0, n1, t0);
+}
+
+
+[numthreads(8, 8, 1)]
+void WindForceCompute(uint3 id : SV_DispatchThreadID) {
+    const uint idx = mad(id.x, _VerCountPerRow, id.y);
+    float3 p = _P1_buffer[idx].xyz;
+    float random = sin(1.047 * (frac(p.x) + frac(p.y) + frac(p.z)));
+
+    // recalculate wind speed
+    float3 wind_v = _Wind_V.xyz * 
+        (1 + _WindVibrationStrength * sin(random * _Time + random) + _WindNoiseStrength * perlin(p));
+
+    // calculate speed in next time step
+    float3 v = (p - _P0_buffer[idx].xyz) * _DeltaT_INV;
+    float3 vRel = v - wind_v;
+    float3 vRel_norm = normalize(vRel);
+    float vRel_M2 = pow(length(vRel), 2);
+    float3 normal = _Normal[idx].xyz;
+
+    float vRel_dot_normal = dot(vRel_norm, normal);
+    if (vRel_dot_normal < 0) {
+        normal = -normal;
+        vRel_dot_normal = -vRel_dot_normal;
+    }
+
+    float cos_q = sqrt(saturate(1 - vRel_dot_normal * vRel_dot_normal));
+    float3 forceDrag = _Drag * vRel_M2 * vRel_dot_normal * (-vRel_norm);  // dot之内的vRel是不是要normalize
+    float3 forceLift = _Lift * vRel_M2 * cos_q * normalize(cross(cross(normal, vRel), vRel));
+
+    _Acceleration[idx] = float4(_G.xyz + forceDrag + forceLift, 0); // 质点质量为1 force=acceleration
+}

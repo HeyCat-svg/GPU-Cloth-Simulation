@@ -1,0 +1,397 @@
+/*
+ * 描述：linkInfo中包含6条边是否连接的编码，从顶点上边记为0，顺时针分别记为1,2,3,4,5
+ * Trimap中一个方格6个三角形顶点，top-left->down-right->top-right  top-left->down-left->down-right
+ */
+
+
+#pragma kernel NodeUpdate
+#pragma kernel NodeCorrection_length
+#pragma kernel NodeCorrection_bending
+#pragma kernel NodeLinkCorrection
+#pragma kernel NodeLinkCorrection_INV
+
+
+RWStructuredBuffer<float4> _P0_buffer;
+RWStructuredBuffer<float4> _P1_buffer;
+RWStructuredBuffer<float4> _P1_bufferTmp;
+StructuredBuffer<float4> _TRS_Mat;
+StructuredBuffer<float4> _Acceleration;
+RWStructuredBuffer<uint> _LinkInfo;    // 记录每个节点与周围节点的连接关系 采取32位编码 最多记录32条边信息
+RWStructuredBuffer<uint> _Trimap;
+
+uint _VerCountPerCol;
+uint _VerCountPerRow;
+uint _IterCount;
+
+float _GridSize;
+float _BendingAngle;
+float _Damping;
+float _DeltaT;
+float _DeltaT2;
+
+float4 _G;
+float4 _LeftFixP;
+float4 _RightFixP;
+
+/* 边的断裂阈值 */
+float lineBreakThres;       // maxLength / normalLength
+
+/* 锚点信息 */
+uint _AnchorCount;
+StructuredBuffer<uint2> _AnchorRowCol;
+StructuredBuffer<float4> _AnchorRelPos;
+
+
+float3 verlet(float3 p0, float3 p1, float damping, float3 a, float dt) {
+    return p1 + damping * (p1 - p0) + a * dt * dt;
+}
+
+// 返回的是坐标
+float3 lengthConstraint(float3 p1, float3 p2, float3 _length) {
+    float3 deltaP = p2 - p1;
+    float m = length(deltaP);
+    float3 offset = deltaP * (m - _length) / (2 * m);
+    return p1 + offset;
+}
+
+// 4 rows 3 cols 返回的是变化量
+float4x3 normalBending(float3 _p1, float3 _p2, float3 _p3, float3 _p4) {
+    float3 p2 = _p2 - _p1;
+    float3 p3 = _p3 - _p1;
+    float3 p4 = _p4 - _p1;
+
+    float3 n1 = normalize(cross(p2, p3));
+    float3 n2 = normalize(cross(p2, p4));
+
+    float d = dot(n1, n2);
+
+    float4x3 q;
+    q[2] = (cross(p2, n2) + cross(n1, p2) * d) / max(length(cross(p2, p3)), 0.0001);
+    q[3] = (cross(p2, n1) + cross(n2, p2) * d) / max(length(cross(p2, p4)), 0.0001);
+    q[1] = -(cross(p3, n2) + cross(n1, p3) * d) / max(length(cross(p2, p3)), 0.0001)
+            - (cross(p4, n1) + cross(n2, p4) * d) / max(length(cross(p2, p4)), 0.0001);;
+    q[0] = -(q[1] + q[2] + q[3]);
+
+    float div = 0.0f;
+    for (int i = 0; i < 4; ++i) {
+        float m = length(q[i]);
+        div += m * m;
+    }
+
+    float fact = -sqrt(max(1.0f - d * d, 0.0001)) * (acos(clamp(d, -1, 1)) - _BendingAngle) / max(div, 0.0001);
+
+    float4x3 ret = 0.0f;
+    for (i = 0; i < 4; ++i) {
+        ret[i] = fact * q[i];
+    }
+
+    return ret;
+}
+
+
+[numthreads(8, 8, 1)]
+void NodeUpdate(uint3 id : SV_DispatchThreadID) {
+    const uint idx = mad(id.x, _VerCountPerRow, id.y);
+    float3 a = _Acceleration[idx].xyz;
+
+    // update pos using verlet
+    float3 p2 = verlet(_P0_buffer[idx].xyz, _P1_buffer[idx].xyz, _Damping, a, _DeltaT);
+    _P0_buffer[idx] = _P1_buffer[idx];
+    _P1_buffer[idx] = float4(p2, 1.0f);
+}
+
+
+[numthreads(8, 8, 1)]
+void NodeCorrection_length(uint3 id : SV_DispatchThreadID) {
+    const uint idx = mad(id.x, _VerCountPerRow, id.y);
+
+    float3 p = _P1_buffer[idx].xyz;
+    uint linkInfo = _LinkInfo[idx];
+
+    float3 result = float3(0, 0, 0);
+    float sum = 0.0;
+
+    // left
+    if (id.y > 0 && (linkInfo & (0x1 << 4))) {
+        result += lengthConstraint(p, _P1_buffer[id.x * _VerCountPerRow + id.y - 1].xyz, _GridSize);
+        sum += 1.0;
+    }
+    // right
+    if (id.y < _VerCountPerRow - 1 && (linkInfo & (0x1 << 1))) {
+        result += lengthConstraint(p, _P1_buffer[id.x * _VerCountPerRow + id.y + 1].xyz, _GridSize);
+        sum += 1.0;
+    }
+    // down
+    if (id.x < _VerCountPerCol - 1 && (linkInfo & (0x1 << 3))) {
+        result += lengthConstraint(p, _P1_buffer[(id.x + 1) * _VerCountPerRow + id.y].xyz, _GridSize);
+        sum += 1.0;
+    }
+    // up
+    if (id.x > 0 && (linkInfo & (0x1 << 0))) {
+        result += lengthConstraint(p, _P1_buffer[(id.x - 1) * _VerCountPerRow + id.y].xyz, _GridSize);
+        sum += 1.0;
+    }
+    // up-left
+    if (id.x > 0 && id.y > 0 && (linkInfo & (0x1 << 5))) {
+        result += lengthConstraint(p, _P1_buffer[(id.x - 1) * _VerCountPerRow + id.y - 1].xyz, sqrt(2) * _GridSize);
+        sum += 1.0;
+    }
+    // down-right
+    if (id.x < _VerCountPerCol - 1 && id.y < _VerCountPerRow - 1 && (linkInfo & (0x1 << 2))) {
+        result += lengthConstraint(p, _P1_buffer[(id.x + 1) * _VerCountPerRow + id.y + 1].xyz, sqrt(2) * _GridSize);
+        sum += 1.0;
+    }
+    
+    _P1_bufferTmp[idx] = (sum == 0) ? float4(p, 1.0) : float4(result / sum, 1.0);
+}
+
+
+[numthreads(8, 8, 1)]
+void NodeCorrection_bending(uint3 id : SV_DispatchThreadID) {
+    const uint idx = mad(id.x, _VerCountPerRow, id.y);
+    float3 p = _P1_buffer[idx].xyz;
+    uint linkInfo = _LinkInfo[idx];
+
+    float3 result = float3(0, 0, 0);
+    float sum = 0;
+
+    for (uint i = 0; i < _AnchorCount; ++i) {
+        uint2 anchorRowCol = _AnchorRowCol[i];
+        if (id.x == anchorRowCol.x && id.y == anchorRowCol.y) {
+            float4x4 TRS = float4x4(_TRS_Mat[0], _TRS_Mat[1], _TRS_Mat[2], _TRS_Mat[3]);
+            _P1_bufferTmp[idx] = mul(TRS, _AnchorRelPos[i]);
+            return;
+        }
+    }
+
+    // _P1_bufferTmp[idx] = float4(p, 1.0);
+    // return;
+
+    // // left-left
+    // if (id.x > 0 && id.y > 1) {
+    //     float4x3 ret = normalBending(
+    //         _P1_buffer[id.x * _VerCountPerRow + id.y - 1].xyz,
+    //         _P1_buffer[(id.x - 1) * _VerCountPerRow + id.y - 1].xyz,
+    //         _P1_buffer[(id.x - 1) * _VerCountPerRow + id.y - 2].xyz,
+    //         p
+    //     );
+    //     result = result + (p + ret[3]);
+    //     sum += 1.0;
+    // }
+    // left-up
+    if (id.x > 1 && id.y > 0 && (linkInfo & (0x1 << 0)) && (linkInfo & (0x1 << 5))) {
+        uint linkInfo_up = _LinkInfo[idx - _VerCountPerRow];
+        uint linkInfo_leftup = _LinkInfo[idx - _VerCountPerRow - 1];
+        if ((linkInfo_up & (0x1 << 5)) && (linkInfo_up & (0x1 << 4)) && (linkInfo_leftup & (0x1 << 0))) {
+            float4x3 ret = normalBending(
+                _P1_buffer[(id.x - 1) * _VerCountPerRow + id.y - 1].xyz,
+                _P1_buffer[(id.x - 1) * _VerCountPerRow + id.y].xyz,
+                _P1_buffer[(id.x - 2) * _VerCountPerRow + id.y - 1].xyz,
+                p
+            );
+            result = result + (p + ret[3]);
+            sum += 1.0;
+        } 
+    }
+    // // left-right
+    // if (id.x > 0 && id.y > 0 && id.y < _VerCountPerRow - 1) {
+    //     float4x3 ret = normalBending(
+    //         p,
+    //         _P1_buffer[(id.x - 1) * _VerCountPerRow + id.y].xyz,
+    //         _P1_buffer[(id.x - 1) * _VerCountPerRow + id.y - 1].xyz,
+    //         _P1_buffer[id.x * _VerCountPerRow + id.y + 1].xyz
+    //     );
+    //     result = result + (p + ret[0]);
+    //     sum += 1.0;
+    // }
+    // left-down
+    if (id.x > 0 && id.y > 0 && id.x < _VerCountPerCol - 1 && (linkInfo & (0x1 << 5)) && (linkInfo & (0x1 << 3)) && (linkInfo & (0x1 << 4))) {
+        uint linkInfo_left = _LinkInfo[idx - 1];
+        if ((linkInfo_left & (0x1 << 0)) && (linkInfo_left & (0x1 << 2))) {
+            float4x3 ret = normalBending(
+                _P1_buffer[id.x * _VerCountPerRow + id.y - 1].xyz,
+                p,
+                _P1_buffer[(id.x - 1) * _VerCountPerRow + id.y - 1].xyz,
+                _P1_buffer[(id.x + 1) * _VerCountPerRow + id.y].xyz
+            );
+            result = result + (p + ret[1]);
+            sum += 1.0;
+        }
+    }
+    // // right-left
+    // if (id.y > 0 && id.y < _VerCountPerRow - 1 && id.x < _VerCountPerCol - 1) {
+    //     float4x3 ret = normalBending(
+    //         _P1_buffer[(id.x + 1) * _VerCountPerRow + id.y].xyz,
+    //         p,
+    //         _P1_buffer[id.x * _VerCountPerRow + id.y - 1].xyz,
+    //         _P1_buffer[(id.x + 1) * _VerCountPerRow + id.y + 1].xyz
+    //     );
+    //     result = result + (p + ret[1]);
+    //     sum += 1.0;
+    // }
+    // right-up
+    if (id.x > 0 && id.x < _VerCountPerCol - 1 && id.y < _VerCountPerRow - 1 && (linkInfo & (0x1 << 0)) && (linkInfo & (0x1 << 2)) && (linkInfo & (0x1 << 1))) {
+        uint linkInfo_right = _LinkInfo[idx + 1];
+        if ((linkInfo_right & (0x1 << 5)) && (linkInfo_right & (0x1 << 3))) {
+            float4x3 ret = normalBending(
+                p,
+                _P1_buffer[id.x * _VerCountPerRow + id.y + 1].xyz,
+                _P1_buffer[(id.x - 1) * _VerCountPerRow + id.y].xyz,
+                _P1_buffer[(id.x + 1) * _VerCountPerRow + id.y + 1].xyz
+            );
+            result = result + (p + ret[0]);
+            sum += 1.0;
+        }
+    }
+    // // right-right
+    // if (id.x < _VerCountPerCol - 1 && id.y < _VerCountPerRow - 2) {
+    //     float4x3 ret = normalBending(
+    //         _P1_buffer[(id.x + 1) * _VerCountPerRow + id.y + 1].xyz,
+    //         _P1_buffer[id.x * _VerCountPerRow + id.y + 1].xyz,
+    //         p,
+    //         _P1_buffer[(id.x + 1) * _VerCountPerRow + id.y + 2].xyz
+    //     );
+    //     result = result + (p + ret[2]);
+    //     sum += 1.0;
+    // }
+    // right-down
+    if (id.x < _VerCountPerCol - 2 && id.y < _VerCountPerRow - 1 && (linkInfo & (0x1 << 2)) && (linkInfo & (0x1 << 3))) {
+        uint linkInfo_down = _LinkInfo[idx + _VerCountPerRow];
+        uint linkInfo_downright = _LinkInfo[idx + _VerCountPerRow + 1];
+        if ((linkInfo_down & (0x1 << 1)) && (linkInfo_down & (0x1 << 2)) && (linkInfo_downright & (0x1 << 3))) {
+            float4x3 ret = normalBending(
+                _P1_buffer[(id.x + 1) * _VerCountPerRow + id.y].xyz,
+                _P1_buffer[(id.x + 1) * _VerCountPerRow + id.y + 1].xyz,
+                p,
+                _P1_buffer[(id.x + 2) * _VerCountPerRow + id.y + 1].xyz
+            );
+            result = result + (p + ret[2]);
+            sum += 1.0;
+        }
+    }
+
+    // sum存在为0的情况
+    _P1_bufferTmp[idx] = (sum == 0) ? float4(p, 1.0) : float4(result / sum, 1.0);
+}
+
+
+[numthreads(8, 8, 1)]
+void NodeLinkCorrection(uint3 id : SV_DispatchThreadID) {
+    const uint idx = mad(id.x, _VerCountPerRow, id.y);
+    uint triIdxCountPerRow = (_VerCountPerRow - 1) * 6;
+    float3 p = _P1_buffer[idx].xyz;
+    uint linkInfo = _LinkInfo[idx];
+
+    float3 p1 = float3(0, 0, 0);
+    float dist = 0;
+    // 左上角一片
+    if (id.x < _VerCountPerCol - 1 && id.y < _VerCountPerRow - 1) {
+        // right
+        if (linkInfo & (0x1 << 1)) {
+            p1 = _P1_buffer[idx + 1].xyz;
+            dist = distance(p, p1);
+            if (dist > _GridSize * lineBreakThres) {
+                linkInfo &= ~(0x1 << 1);    // 删除这条边
+                _Trimap[id.x * triIdxCountPerRow + id.y * 6 + 2] = idx; // 把三角形的顶点收回来
+                if (id.x > 0) { // 另一个三角形的顶点
+                    _Trimap[(id.x - 1) * triIdxCountPerRow + id.y * 6 + 5] = idx;
+                }
+            }
+        }
+        // down-right
+        if (linkInfo & (0x1 << 2)) {
+            p1 = _P1_buffer[idx + _VerCountPerRow + 1].xyz;
+            dist = distance(p, p1);
+            if (dist > sqrt(2) * _GridSize * lineBreakThres) {
+                linkInfo &= ~(0x1 << 2);
+                _Trimap[id.x * triIdxCountPerRow + id.y * 6 + 1] = idx;
+                _Trimap[id.x * triIdxCountPerRow + id.y * 6 + 5] = idx;
+            }
+        }
+        // down
+        if (linkInfo & (0x1 << 3)) {
+            p1 = _P1_buffer[idx + _VerCountPerRow].xyz;
+            dist = distance(p, p1);
+            if (dist > _GridSize * lineBreakThres) {
+                linkInfo &= ~(0x1 << 3);
+                _Trimap[id.x * triIdxCountPerRow + id.y * 6 + 4] = idx;
+                if (id.y > 0) {
+                    _Trimap[id.x * triIdxCountPerRow + (id.y - 1) * 6 + 1] = idx;
+                }
+            }
+        }
+    }
+    // 最下面一行
+    else if (id.x == _VerCountPerCol - 1 && id.y < _VerCountPerRow - 1) {
+        // right
+        if (linkInfo & (0x1 << 1)) {
+            p1 = _P1_buffer[idx + 1].xyz;
+            dist = distance(p, p1);
+            if (dist > _GridSize * lineBreakThres) {
+                linkInfo &= ~(0x1 << 1);
+                _Trimap[(id.x - 1) * triIdxCountPerRow + id.y * 6 + 5] = idx;
+            }
+        }
+    }
+    // 最右边一行
+    else if (id.x < _VerCountPerCol - 1 && id.y == _VerCountPerRow - 1) {
+        // down
+        if (linkInfo & (0x1 << 3)) {
+            p1 = _P1_buffer[idx + _VerCountPerRow].xyz;
+            dist = distance(p, p1);
+            if (dist > _GridSize * lineBreakThres) {
+                linkInfo &= ~(0x1 << 3);
+                _Trimap[id.x * triIdxCountPerRow + (id.y - 1) * 6 + 1] = idx;
+            }
+        }
+    }
+    // 右下角一个
+    else {
+        // empty
+    }
+
+    _LinkInfo[idx] = linkInfo;
+}
+
+
+[numthreads(8, 8, 1)]
+void NodeLinkCorrection_INV(uint3 id : SV_DispatchThreadID) {
+    const uint idx = mad(id.x, _VerCountPerRow, id.y);
+    uint linkInfo = _LinkInfo[idx];
+
+    // 右下的一片
+    if (id.x > 0 && id.y > 0) {
+        // up
+        if (!(_LinkInfo[idx - _VerCountPerRow] & (0x1 << 3))) {
+            linkInfo &= ~(0x1 << 0);
+        }
+        // up-left
+        if (!(_LinkInfo[idx - _VerCountPerRow - 1] & (0x1 << 2))) {
+            linkInfo &= ~(0x1 << 5);
+        }
+        // left
+        if (!(_LinkInfo[idx - 1] & (0x1 << 1))) {
+            linkInfo &= ~(0x1 << 4);
+        }
+    }
+    // 最上面一行
+    else if (id.x == 0 && id.y > 0) {
+        // left
+        if (!(_LinkInfo[idx - 1] & (0x1 << 1))) {
+            linkInfo &= ~(0x1 << 4);
+        }
+    }
+    // 最左边一行
+    else if (id.x > 0 && id.y == 0) {
+        // up
+        if (!(_LinkInfo[idx - _VerCountPerRow] & (0x1 << 3))) {
+            linkInfo &= ~(0x1 << 0);
+        }
+    }
+    // 左上角一点
+    else {
+        // empty
+    }
+
+    _LinkInfo[idx] = linkInfo;
+}

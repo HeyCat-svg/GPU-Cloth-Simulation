@@ -1,0 +1,65 @@
+#pragma kernel Norm
+
+StructuredBuffer<float4> _Position;
+RWStructuredBuffer<float4> _Normal;
+StructuredBuffer<uint> _LinkInfo;
+
+uint _VerCountPerCol;
+uint _VerCountPerRow;
+
+inline float3 safeNormalize(float3 inVec) {
+    float dp3 = max(0.001f, dot(inVec, inVec));
+    return inVec * rsqrt(dp3);
+}
+
+[numthreads(8, 8, 1)]
+void Norm(uint3 id : SV_DispatchThreadID) {
+    const uint idx = mad(id.x, _VerCountPerRow, id.y);
+    float3 p = _Position[idx].xyz;
+    uint linkInfo = _LinkInfo[idx];
+
+    float3 n = float3(0, 0, 0);
+    float3 a, b, c;
+
+    if (id.x < _VerCountPerCol - 1) {
+        // down
+        c = (linkInfo & (0x1 << 3)) ? (_Position[idx + _VerCountPerRow].xyz - p) : float3(0, 0, 0);
+        
+        if (id.y < _VerCountPerRow - 1) {
+            // right
+            a = (linkInfo & (0x1 << 1)) ? (_Position[idx + 1].xyz - p) : float3(0, 0, 0); 
+            // down-right
+            b = (linkInfo & (0x1 << 2)) ? (_Position[idx + _VerCountPerRow + 1].xyz - p) : float3(0, 0, 0);
+            n += safeNormalize(cross(b, a));
+            n += safeNormalize(cross(c, b));
+        }
+        if (id.y > 0) {
+            // left
+            a = (linkInfo & (0x1 << 4)) ? (_Position[idx - 1].xyz - p) : float3(0, 0, 0);
+            n += safeNormalize(cross(a, c));
+        }
+    }
+
+    if (id.x > 0) {
+        // up
+        c = (linkInfo & (0x1 << 0)) ? (_Position[idx - _VerCountPerRow].xyz - p) : float3(0, 0, 0);
+
+        if (id.y > 0) {
+            // left
+            a = (linkInfo & (0x1 << 4)) ? (_Position[idx - 1].xyz - p) : float3(0, 0, 0);
+            // up-left
+            b = (linkInfo & (0x1 << 5)) ? (_Position[idx - _VerCountPerRow - 1].xyz - p) : float3(0, 0, 0);
+            n += safeNormalize(cross(c, b));
+            n += safeNormalize(cross(b, a));
+        }
+        if (id.y < _VerCountPerRow - 1) {
+            // right
+            a = (linkInfo & (0x1 << 1)) ? (_Position[idx + 1].xyz - p) : float3(0, 0, 0);
+            n += safeNormalize(cross(a, c));
+        }
+    }
+
+    float3 ret = (dot(n, n) == 0) ? float3(1, 0, 0) : safeNormalize(n);
+
+    _Normal[idx] = float4(ret, 0);
+}

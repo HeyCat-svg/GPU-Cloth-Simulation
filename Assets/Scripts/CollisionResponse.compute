@@ -1,0 +1,188 @@
+#pragma kernel SphereCollisionResponse
+#pragma kernel CubeCollisionResponse
+#pragma kernel InnerCollisionResponse
+#pragma kernel SwapCollisionResponse
+#pragma kernel BunnyCollisionResponse
+
+RWStructuredBuffer<float4> _P1_buffer;
+RWStructuredBuffer<float4> _P1_bufferTmp;
+StructuredBuffer<float3> Bunnyspace;
+
+uint _VerCountPerCol;
+uint _VerCountPerRow;
+float _DeltaT;
+
+float Radius;
+float4 SphereCenter;
+float4 CubeScale;
+float4 CubeCenter;
+float4 Bunnycenter;
+float4 Bunnyedge;
+float4x4 Cuberot;
+float4x4 Cuberot_inv;
+float4x4 Bunnyrot;
+float4x4 Bunnyrot_inv;
+
+[numthreads(8, 8, 1)]
+void SphereCollisionResponse(uint3 id : SV_DispatchThreadID) {
+	int index = id.x*_VerCountPerRow + id.y;
+
+	float4 pos = _P1_buffer[index];
+	if (length(pos - SphereCenter) < Radius) {
+		pos = SphereCenter + normalize(pos - SphereCenter)*Radius;
+		_P1_buffer[index] = pos;
+		return;
+	}
+	else {
+		return;
+	}
+}
+
+bool Isincube(float4 pos) {
+	if (abs(pos[0]) <= CubeScale[0] && abs(pos[1]) <= CubeScale[1] && abs(pos[2]) <= CubeScale[2]) {
+		return true;
+	}
+	else {
+		return false;
+	}
+}
+
+[numthreads(8, 8, 1)]
+void CubeCollisionResponse(uint3 id : SV_DispatchThreadID) {
+	int index = id.x*_VerCountPerRow + id.y;
+	float4 pos = _P1_buffer[index];
+	pos = mul(Cuberot, pos);
+	if (Isincube(pos)) {
+		float ratio0 = abs(pos[0]) / CubeScale[0];
+		float ratio1 = abs(pos[1]) / CubeScale[1];
+		float ratio2 = abs(pos[2]) / CubeScale[2];
+		if (ratio0 == max(ratio0, max(ratio1, ratio2))) {
+			pos[0] = pos[0] / abs(pos[0])*CubeScale[0];
+		}
+		if (ratio1 == max(ratio0, max(ratio1, ratio2))) {
+			pos[1] = pos[1] / abs(pos[1])*CubeScale[1];
+		}
+		if (ratio2 == max(ratio0, max(ratio1, ratio2))) {
+			pos[2] = pos[2] / abs(pos[2])*CubeScale[2];
+		}
+		pos = mul(Cuberot_inv, pos);
+		_P1_buffer[index] = pos;
+		return;
+	}
+	else {
+		return;
+	}
+}
+
+//handle bunny 碰撞球
+/*
+[numthreads(8, 8, 1)]
+void BunnyCollisionResponse(uint3 id : SV_DispatchThreadID) {
+	uint startindex = id.x * 8 * _VerCountPerRow + id.y * 8;
+	float4 targetpos = _P1_buffer[startindex + 4 * _VerCountPerRow + 4];
+	if (length(targetpos - Bunnyedge) > 0.3) {
+		return;
+	}
+	float4 orientation = normalize(Bunnyedge - Bunnycenter);
+	for (int i = 0; i < 8; i++) {
+		for (int j = 0; j < 8; j++) {
+			int index = startindex + i * _VerCountPerRow + j;
+			float4 tmppos =  _P1_buffer[index];
+			float len = length(tmppos - Bunnyedge);
+			if (len < 0.1) {
+				_P1_buffer[index] = tmppos + 0.003*orientation * (0.1 - len);
+			}
+
+		}
+	}
+	return;
+}
+*/
+
+[numthreads(8, 8, 1)]
+void BunnyCollisionResponse(uint3 id : SV_DispatchThreadID) {
+	int index = id.x*_VerCountPerRow + id.y;
+	float4 pos = _P1_buffer[index];
+	pos = mul(Bunnyrot_inv, pos);
+	int posx = (int)(5.0f * (pos[0] + 6));
+	int posy = (int)(5.0f * (pos[1] + 10));
+	int posz = (int)(5.0f * (pos[2] + 4));
+	if (posx < 0 || posx >= 60 || posy < 0 || posy >= 100 || posz < 0 || posz >= 40) {
+		return;
+	}
+	pos = pos + float4(Bunnyspace[posx * 40 * 100 + posy * 40 + posz], 0)*0.015;
+	pos = mul(Bunnyrot, pos);
+	_P1_buffer[index] = pos;
+}
+
+float4 caldist(int index1, int index2) {
+	float4 pos1 = _P1_buffer[index1 + 3 * _VerCountPerRow + 3];
+	float4 pos2 = _P1_buffer[index2 + 3 * _VerCountPerRow + 3];
+	return pos1 - pos2;
+}
+float4 caldist2(int index1, int index2) {
+	float4 pos1 = _P1_buffer[index1 + 3 * _VerCountPerRow + 3];
+	float4 pos2 = _P1_buffer[index2 + 3 * _VerCountPerRow + 3];
+	return pos1 - pos2;
+}
+void Selfcollisionupdate(int index, float4 orientation) {
+	for (int i = 0; i < 8; i++) {
+		for (int j = 0; j < 8; j++) {
+			uint offset = abs(7 - 2 * i) + abs(7 - 2 * j);
+			float co = 0.005*(5 + offset / 80);
+			_P1_bufferTmp[index + i * _VerCountPerRow + j] = _P1_buffer[index + i * _VerCountPerRow + j] + orientation * co;
+		}
+	}
+}
+bool Handlecolli(int startindex, uint _x, uint _y) {
+	float allowedlength = 0.05;
+	int targetindex = _x * 8 * _VerCountPerRow + 8 * _y;
+	float4 dist = caldist(startindex, targetindex);
+	if (targetindex != startindex && length(dist) < allowedlength) {
+		dist = normalize(dist);
+		Selfcollisionupdate(startindex, dist);
+		return true;
+	}
+	return false;
+}
+
+[numthreads(8, 8, 1)]
+void InnerCollisionResponse(uint3 id : SV_DispatchThreadID) {
+	uint startindex = id.x * 8 * _VerCountPerRow + 8 * id.y;
+	uint groupperrow = _VerCountPerRow / 4;
+	for (uint i = 0; i < groupperrow*groupperrow; i++) {
+		uint _x = i / groupperrow;
+		uint _y = i - groupperrow * _x;
+		uint targetindex = (_x * 16 + 8) * _VerCountPerRow + 16 * _y + 8;
+		if (length(caldist2(startindex, targetindex)) > 0.05) {
+			Selfcollisionupdate(startindex, float4(0, 0, 0, 0));
+			return;
+		}
+		_x = _x * 2;
+		_y = _y * 2;
+		if (Handlecolli(startindex, _x, _y)) {
+			return;
+		}
+		if (Handlecolli(startindex, _x + 1, _y)) {
+			return;
+		}
+		if (Handlecolli(startindex, _x, _y + 1)) {
+			return;
+		}
+		if (Handlecolli(startindex, _x + 1, _y + 1)) {
+			return;
+		}
+	}
+	Selfcollisionupdate(startindex, float4(0, 0, 0, 0));
+	return;
+}
+
+[numthreads(8, 8, 1)]
+void SwapCollisionResponse(uint3 id : SV_DispatchThreadID) {
+
+	int index = id.x*_VerCountPerRow + id.y;
+	float4 tmp = _P1_buffer[index];
+	_P1_buffer[index] = _P1_bufferTmp[index];
+	_P1_bufferTmp[index] = tmp;
+	return;
+}
